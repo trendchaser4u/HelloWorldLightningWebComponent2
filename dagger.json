@@ -1,0 +1,8 @@
+{
+  "name": "salesforce-ci-cd",
+  "engineVersion": "v0.18.9",
+  "sdk": {
+    "source": "python"
+  },
+  "source": ".dagger"
+}

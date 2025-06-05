@@ -1,0 +1,39 @@
+<template>
+  <lightning-card title="Hello World LWC" icon-name="standard:hello">
+    <div class="slds-m-around_medium">
+      <div class="slds-form-element">
+        <label class="slds-form-element__label" for="name-input"
+          >Enter your name:</label
+        >
+        <div class="slds-form-element__control">
+          <lightning-input
+            id="name-input"
+            type="text"
+            value={userName}
+            onchange={handleNameChange}
+            placeholder="Enter your name"
+          >
+          </lightning-input>
+        </div>
+      </div>
+
+      <div class="slds-m-top_medium">
+        <lightning-button
+          label="Get Greeting"
+          onclick={handleGetGreeting}
+          variant="brand"
+        >
+        </lightning-button>
+      </div>
+
+      <div class="slds-m-top_medium">
+        <div class="slds-text-heading_medium">{greeting}</div>
+      </div>
+
+      <div class="slds-m-top_medium slds-text-body_small">
+        <strong>Current Date/Time:</strong>
+        <span class="current-date-time">{currentDateTime}</span>
+      </div>
+    </div>
+  </lightning-card>
+</template>

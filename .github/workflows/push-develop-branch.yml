@@ -1,0 +1,77 @@
+# Unique name for this workflow
+name: Deploy develop branch to integration org
+
+# Definition when the workflow should run
+on:
+  push:
+    branches: [develop]
+    paths:
+      - "force-app/**"
+
+# Jobs to be executed
+jobs:
+  deploy-branch-to-int-org:
+    runs-on: ubuntu-latest
+    if: ${{ github.actor != 'dependabot[bot]' }}
+    steps:
+      # Now we install nodejs in the VM, and specify version 22
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "22"
+
+      # Checkout the source code
+      - name: "Checkout source code"
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # Install Salesforce CLI
+      - name: "Install Salesforce CLI"
+        run: |
+          npm install -g @salesforce/cli
+          sf version
+
+      # install SFDX-Git-Delta plugin - https://github.com/scolladon/sfdx-git-delta
+      - name: "Installing sfdx git delta"
+        run: |
+          echo y | sf plugins install sfdx-git-delta
+          sf plugins --core
+
+      # Store secret for both otgs
+      - name: "Populate auth file with SFDX_URL secret of integration org"
+        shell: bash
+        run: |
+          echo ${{ secrets.SFDX_INTEGRATION_URL}} > ./SFDX_INTEGRATION_URL.txt
+
+      # Authenticate to org
+      - name: "Authenticate to Integration Org"
+        run: sf org login sfdx-url --sfdx-url-file ./SFDX_INTEGRATION_URL.txt --set-default --alias integration
+
+      - name: "Create delta packages for new, modified or deleted metadata"
+        run: |
+          mkdir changed-sources
+          sf sgd source delta --to "HEAD" --from "HEAD^" --output-dir changed-sources/ --generate-delta --source-dir force-app/
+
+      - name: "Deploy the entire branch to Integration org"
+        run: |
+          # Check if there are any Apex classes in the deployment
+          if find changed-sources -name "*.cls" -type f | grep -q .; then
+            echo "Found Apex classes, running all local tests..."
+            sf project deploy start --source-dir "changed-sources/force-app" --target-org integration --wait 10 --test-level RunLocalTests --json > deploy_result.json
+          else
+            echo "No Apex classes found, skipping tests..."
+            sf project deploy start --source-dir "changed-sources/force-app" --target-org integration --wait 10 --test-level NoTestRun --json > deploy_result.json
+          fi
+          cat deploy_result.json
+        continue-on-error: false
+
+      - name: "Display deployment results on failure"
+        if: failure()
+        run: |
+          echo "Deployment failed. Checking for detailed error information..."
+          if [ -f deploy_result.json ]; then
+            cat deploy_result.json
+          fi
+
+      - name: "Deploy destructive changes (if any) to Integration org"
+        run: sf project deploy start --metadata-dir "changed-sources/destructiveChanges" --target-org integration --wait 10
