@@ -184,58 +184,189 @@ class SalesforceCiCd:
             .with_exec(["cat", f"{output_dir}/apexScanResults.sarif"])
         )
 
-    # TODO: make changes to run only specified tests after prepare delta source
     @function
     async def run_lwc_unit_tests(
         self,
         source: Annotated[dagger.Directory, DefaultPath("/"), Doc("source directory")],
         container: dagger.Container | None = None,
+        lwc_tests: Annotated[str, Doc("run delta or all lwc tests")] = "all",
+        delta_source: Annotated[
+            str, Doc("Delta sources directory")
+        ] = "changed-sources",
     ) -> dagger.Container:
         """Run Lightning Web Component unit tests with Jest."""
 
         if container is None:
-            container = await self.build_env(source)
+            container = await self.prepare_delta_source(source)
 
-        return (
-            container
-            # Check if Jest configuration exists
-            .with_exec(
-                [
-                    "bash",
-                    "-c",
-                    """
-                if [ -f "jest.config.js" ] || [ -f "package.json" ]; then
-                    echo "Jest configuration found, proceeding with tests..."
-                else
-                    echo "No Jest configuration found, skipping LWC tests"
-                    exit 0
-                fi
-                """,
-                ]
-            ).with_exec(  # Run LWC unit tests
-                ["npm", "run", "test:unit"]
+        if lwc_tests.lower() == "delta":
+            container = (
+                container
+                # Verify delta sources exist
+                .with_exec(
+                    [
+                        "bash",
+                        "-c",
+                        f"""
+                    if [ ! -d "/src/{delta_source}" ]; then
+                        echo "Error: Delta sources directory '/src/{delta_source}' does not exist."
+                        echo "Please run prepare-delta-source function first."
+                        exit 1
+                    fi
+                    
+                    echo "Delta sources directory verified: /src/{delta_source}"
+                    ls -la /src/{delta_source}
+                    """,
+                    ]
+                )
+                # Check if Jest configuration exists and if there are LWC components to test
+                .with_exec(
+                    [
+                        "bash",
+                        "-c",
+                        f"""
+                    if [ ! -f "jest.config.js" ] && [ ! -f "package.json" ]; then
+                        echo "No Jest configuration found, skipping LWC tests"
+                        exit 0
+                    fi
+                    
+                    # Check if there are any LWC components in the delta sources
+                    if [ ! -d "/src/{delta_source}/force-app/main/default/lwc" ]; then
+                        echo "No LWC components found in delta sources. Skipping LWC unit tests."
+                        exit 0
+                    fi
+                    
+                    # Count LWC components with tests
+                    lwc_count=$(find /src/{delta_source}/force-app/main/default/lwc -name "*.js" -not -path "*/__tests__/*" | wc -l)
+                    test_count=$(find /src/{delta_source}/force-app/main/default/lwc -name "*.test.js" | wc -l)
+                    
+                    echo "Found $lwc_count LWC components and $test_count test files in delta sources"
+                    
+                    if [ "$test_count" -eq 0 ]; then
+                        echo "No LWC test files found in delta sources. Skipping tests."
+                        exit 0
+                    fi
+                    
+                    echo "Proceeding with LWC unit tests for delta changes..."
+                    """,
+                    ]
+                )
+                # Create a custom Jest configuration for delta testing
+                .with_exec(
+                    [
+                        "bash",
+                        "-c",
+                        f"""
+                    # Create temporary Jest config for delta testing
+                    cat > jest.config.delta.js << 'EOF'
+                    const {{ jestConfig }} = require('@salesforce/sfdx-lwc-jest/config');
+
+                    module.exports = {{
+                        ...jestConfig,
+                        testMatch: [
+                            '**/{delta_source}/**/lwc/**/__tests__/**/*.test.js'
+                        ],
+                        collectCoverageFrom: [
+                            '**/{delta_source}/**/lwc/**/*.js',
+                            '!**/{delta_source}/**/lwc/**/__tests__/**',
+                            '!**/{delta_source}/**/lwc/**/__mocks__/**'
+                        ],
+                        coverageDirectory: 'coverage-delta',
+                        coverageReporters: ['text', 'lcov', 'json-summary']
+                    }};
+                    EOF
+                    
+                    echo "Custom Jest configuration created for delta testing"
+                    cat jest.config.delta.js
+                    """,
+                    ]
+                )
+                # Run LWC unit tests for delta components only
+                .with_exec(
+                    [
+                        "npx",
+                        "jest",
+                        "--config",
+                        "jest.config.delta.js",
+                        "--passWithNoTests",
+                        "--verbose",
+                    ]
+                )
+                # Generate test coverage report for delta components
+                .with_exec(
+                    [
+                        "npx",
+                        "jest",
+                        "--config",
+                        "jest.config.delta.js",
+                        "--coverage",
+                        "--passWithNoTests",
+                    ]
+                )
+                # Display test results summary
+                .with_exec(["ls", "-la", "coverage-delta/"])
+                # Show coverage summary if available
+                .with_exec(
+                    [
+                        "bash",
+                        "-c",
+                        """
+                    if [ -f "coverage-delta/lcov-report/index.html" ]; then
+                        echo "Delta coverage report generated at coverage-delta/lcov-report/index.html"
+                    fi
+                    if [ -f "coverage-delta/coverage-summary.json" ]; then
+                        echo "Delta Coverage Summary:"
+                        cat coverage-delta/coverage-summary.json
+                    fi
+                    """,
+                    ]
+                )
+                # Clean up temporary config
+                .with_exec(["rm", "-f", "jest.config.delta.js"])
             )
-            # Generate test coverage report
-            .with_exec(["npm", "run", "test:unit:coverage"])
-            # Display test results summary
-            .with_exec(["ls", "-la", "coverage/"])
-            # Show coverage summary if available
-            .with_exec(
-                [
-                    "bash",
-                    "-c",
-                    """
-                if [ -f "coverage/lcov-report/index.html" ]; then
-                    echo "Coverage report generated at coverage/lcov-report/index.html"
-                fi
-                if [ -f "coverage/coverage-summary.json" ]; then
-                    echo "Coverage Summary:"
-                    cat coverage/coverage-summary.json
-                fi
-                """,
-                ]
+        else:
+            container = (
+                container
+                # Check if Jest configuration exists
+                .with_exec(
+                    [
+                        "bash",
+                        "-c",
+                        """
+                        if [ -f "jest.config.js" ] || [ -f "package.json" ]; then
+                            echo "Jest configuration found, proceeding with tests..."
+                        else
+                            echo "No Jest configuration found, skipping LWC tests"
+                            exit 0
+                        fi
+                        """,
+                    ]
+                )
+                # Run LWC unit tests
+                .with_exec(["npm", "run", "test:unit"])
+                # Generate test coverage report
+                .with_exec(["npm", "run", "test:unit:coverage"])
+                # Display test results summary
+                .with_exec(["ls", "-la", "coverage/"])
+                # Show coverage summary if available
+                .with_exec(
+                    [
+                        "bash",
+                        "-c",
+                        """
+                        if [ -f "coverage/lcov-report/index.html" ]; then
+                            echo "Coverage report generated at coverage/lcov-report/index.html"
+                        fi
+                        if [ -f "coverage/coverage-summary.json" ]; then
+                            echo "Coverage Summary:"
+                            cat coverage/coverage-summary.json
+                        fi
+                        """,
+                    ]
+                )
             )
-        )
+
+        return container
 
     @function
     async def login_sf_cli(
@@ -457,11 +588,9 @@ class SalesforceCiCd:
             container = await self.scan_delta_source(source, container)
 
             # Step 4: Run LWC unit tests (only if lwc_tests is not 'none')
-            if lwc_tests.lower() != "none":
-                print("🧪 Running Lightning Web Component unit tests...")
-                container = await self.run_lwc_unit_tests(source, container)
-            else:
-                print("⏭️  Skipping LWC unit tests...")
+
+            print("🧪 Running Lightning Web Component unit tests...")
+            container = await self.run_lwc_unit_tests(source, container, lwc_tests)
 
             # Step 5: Login to Salesforce CLI
             print(f"🔐 Logging into Salesforce org with alias '{alias}'...")
