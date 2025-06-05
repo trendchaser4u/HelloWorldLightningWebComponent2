@@ -1,4 +1,3 @@
-import random
 from typing import Annotated
 
 import dagger
@@ -185,6 +184,7 @@ class SalesforceCiCd:
             .with_exec(["cat", f"{output_dir}/apexScanResults.sarif"])
         )
 
+    # TODO: make changes to run only specified tests after prepare delta source
     @function
     async def run_lwc_unit_tests(
         self,
@@ -270,10 +270,91 @@ class SalesforceCiCd:
     async def dry_run_delta_changes(
         self,
         source: Annotated[dagger.Directory, DefaultPath("/"), Doc("source directory")],
+        auth_url: Annotated[dagger.Secret, Doc("Salesforce auth URL for login")],
         container: dagger.Container | None = None,
         alias: Annotated[str, Doc("Alias for the org")] = "target-org",
         apex_tests: Annotated[str, Doc("Comma seperated apex test classes")] = "all",
     ) -> dagger.Container:
+        """Perform a dry run deployment of delta changes to validate deployment without actually deploying."""
+
+        if container is None:
+            container = await self.prepare_delta_source(source)
+            container = await self.login_sf_cli(source, auth_url, container)
+
+        # Check if delta sources exist
+        container = container.with_exec(
+            [
+                "bash",
+                "-c",
+                """
+                if [ ! -d "/src/changed-sources" ]; then
+                    echo "Error: Delta sources directory 'changed-sources' does not exist."
+                    echo "Please run prepare-delta-source function first."
+                    exit 1
+                fi
+                
+                if [ ! -d "/src/changed-sources/force-app" ]; then
+                    echo "No force-app directory found in delta sources. Nothing to deploy."
+                    exit 0
+                fi
+                
+                echo "Delta sources verified. Proceeding with dry run deployment..."
+                ls -la /src/changed-sources/
+                """,
+            ]
+        )
+
+        # Perform dry run deployment based on apex_tests parameter
+        if apex_tests.lower() == "all":
+            # Run all local tests
+            container = container.with_exec(
+                [
+                    "sf",
+                    "project",
+                    "deploy",
+                    "start",
+                    "--source-dir",
+                    "changed-sources/force-app",
+                    "--dry-run",
+                    "--test-level",
+                    "RunLocalTests",
+                    "--target-org",
+                    alias,
+                    "--json",
+                ]
+            )
+        else:
+            # Run specified tests
+            container = container.with_exec(
+                [
+                    "sf",
+                    "project",
+                    "deploy",
+                    "start",
+                    "--source-dir",
+                    "changed-sources/force-app",
+                    "--dry-run",
+                    "--test-level",
+                    "RunSpecifiedTests",
+                    "--tests",
+                    apex_tests,
+                    "--target-org",
+                    alias,
+                    "--json",
+                ]
+            )
+
+        # Display deployment results summary
+        container = container.with_exec(
+            [
+                "bash",
+                "-c",
+                """
+                echo "Dry run deployment completed successfully!"
+                echo "No actual changes were made to the org."
+                """,
+            ]
+        )
 
         return container
 
@@ -281,12 +362,184 @@ class SalesforceCiCd:
     async def dry_run_delta_destructive_changes(
         self,
         source: Annotated[dagger.Directory, DefaultPath("/"), Doc("source directory")],
+        auth_url: Annotated[dagger.Secret, Doc("Salesforce auth URL for login")],
         container: dagger.Container | None = None,
         alias: Annotated[str, Doc("Alias for the org")] = "target-org",
     ) -> dagger.Container:
+        """Perform a dry run deployment of destructive changes to validate deletion without actually deleting."""
+
+        if container is None:
+            container = await self.prepare_delta_source(source)
+            container = await self.login_sf_cli(source, auth_url, container)
+
+        # Check if destructive changes exist
+        container = container.with_exec(
+            [
+                "bash",
+                "-c",
+                """
+                if [ ! -d "/src/changed-sources" ]; then
+                    echo "Error: Delta sources directory 'changed-sources' does not exist."
+                    echo "Please run prepare-delta-source function first."
+                    exit 1
+                fi
+                
+                echo "Checking for destructive changes..."
+                ls -la /src/changed-sources/
+                
+                if [ ! -f "/src/changed-sources/destructiveChanges/destructiveChanges.xml" ]; then
+                    echo "No destructive changes found. Nothing to delete."
+                    exit 0
+                fi
+                
+                echo "Destructive changes found. Proceeding with dry run deployment..."
+                cat /src/changed-sources/destructiveChanges/destructiveChanges.xml
+                """,
+            ]
+        )
+
+        # Deploy destructive changes with dry run
+        container = container.with_exec(
+            [
+                "sf",
+                "project",
+                "deploy",
+                "start",
+                "--metadata-dir",
+                "changed-sources/destructiveChanges",
+                "--dry-run",
+                "--ignore-warnings",
+                "--target-org",
+                alias,
+                "--json",
+            ]
+        )
+
+        # Display destructive deployment results summary
+        container = container.with_exec(
+            [
+                "bash",
+                "-c",
+                """
+                echo "Dry run destructive deployment completed successfully!"
+                echo "No actual deletions were made to the org."
+                echo "Review the destructive changes before running actual deployment."
+                """,
+            ]
+        )
 
         return container
 
     @function
-    async def ci_pipeline(self, source: dagger.Directory) -> str:
-        return "ci pipleline"
+    async def ci_pipeline(
+        self,
+        source: Annotated[dagger.Directory, DefaultPath("/"), Doc("source directory")],
+        auth_url: Annotated[dagger.Secret, Doc("Salesforce auth URL for login")],
+        alias: Annotated[str, Doc("Alias for the org")] = "target-org",
+        lwc_tests: Annotated[str, Doc("run delta or all lwc tests")] = "all",
+        apex_tests: Annotated[str, Doc("Comma seperated apex test classes")] = "all",
+    ) -> str:
+        """
+        Complete CI pipeline that builds environment, prepares delta changes,
+        runs scans and tests, and performs dry-run deployments.
+        """
+        try:
+            # Step 1: Build base container using build_env
+            print("🏗️  Building development environment...")
+            container = self.build_env(source)
+
+            # Step 2: Prepare delta changes using prepare_delta_source
+            print("📦 Preparing delta source changes...")
+            container = await self.prepare_delta_source(source, container)
+
+            # Step 3: Run scan_delta_source for code quality analysis
+            print("🔍 Scanning delta sources for code quality issues...")
+            container = await self.scan_delta_source(source, container)
+
+            # Step 4: Run LWC unit tests (only if lwc_tests is not 'none')
+            if lwc_tests.lower() != "none":
+                print("🧪 Running Lightning Web Component unit tests...")
+                container = await self.run_lwc_unit_tests(source, container)
+            else:
+                print("⏭️  Skipping LWC unit tests...")
+
+            # Step 5: Login to Salesforce CLI
+            print(f"🔐 Logging into Salesforce org with alias '{alias}'...")
+            container = await self.login_sf_cli(source, auth_url, container, alias)
+
+            # Step 6: Dry run delta changes deployment
+            print("🚀 Performing dry run deployment of delta changes...")
+            container = await self.dry_run_delta_changes(
+                source, auth_url, container, alias, apex_tests
+            )
+
+            # Step 7: Dry run destructive changes (if any)
+            print("💥 Checking and dry running destructive changes...")
+            container = await self.dry_run_delta_destructive_changes(
+                source, auth_url, container, alias
+            )
+
+            # Final validation step
+            final_output = await container.with_exec(
+                [
+                    "bash",
+                    "-c",
+                    """
+                echo "✅ CI Pipeline completed successfully!"
+                echo "📊 Pipeline Summary:"
+                echo "  - Environment built and configured"
+                echo "  - Delta sources prepared and scanned"
+                if [ "$1" != "none" ]; then
+                    echo "  - LWC unit tests executed"
+                else
+                    echo "  - LWC unit tests skipped"
+                fi
+                echo "  - Salesforce CLI authentication successful"
+                echo "  - Delta changes dry run validation passed"
+                echo "  - Destructive changes dry run validation completed"
+                echo ""
+                echo "🎯 Ready for actual deployment!"
+                echo "Use the individual functions for production deployment:"
+                echo "  - deploy_delta_changes (instead of dry_run_delta_changes)"
+                echo "  - deploy_destructive_changes (instead of dry_run_delta_destructive_changes)"
+                """,
+                    lwc_tests,
+                ]
+            ).stdout()
+
+            return final_output
+
+        except Exception as e:
+            # Handle any pipeline failures gracefully
+            error_container = (
+                dag.container()
+                .from_("ubuntu:latest")
+                .with_exec(
+                    [
+                        "bash",
+                        "-c",
+                        f"""
+                    echo "❌ CI Pipeline failed with error:"
+                    echo "Error: {str(e)}"
+                    echo ""
+                    echo "🔧 Troubleshooting steps:"
+                    echo "1. Check if all required files are present in the source directory"
+                    echo "2. Verify the Salesforce auth URL is valid"
+                    echo "3. Ensure the target org is accessible"
+                    echo "4. Check if there are any syntax errors in the changed files"
+                    echo "5. Review individual function logs for detailed error information"
+                    echo ""
+                    echo "💡 You can run individual pipeline steps to isolate the issue:"
+                    echo "  - build-env: Check environment setup"
+                    echo "  - prepare-delta-source: Verify delta generation"
+                    echo "  - scan-delta-source: Check code quality issues"
+                    echo "  - run-lwc-unit-tests: Validate LWC tests"
+                    echo "  - login-sf-cli: Test Salesforce authentication"
+                    exit 1
+                    """,
+                    ]
+                )
+            )
+
+            error_output = await error_container.stdout()
+            return error_output
