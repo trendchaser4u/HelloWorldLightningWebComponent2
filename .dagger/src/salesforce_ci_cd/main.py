@@ -576,34 +576,26 @@ class SalesforceCiCd:
         """
         try:
             # Step 1: Build base container using build_env
-            print("🏗️  Building development environment...")
             container = self.build_env(source)
 
             # Step 2: Prepare delta changes using prepare_delta_source
-            print("📦 Preparing delta source changes...")
             container = await self.prepare_delta_source(source, container)
 
             # Step 3: Run scan_delta_source for code quality analysis
-            print("🔍 Scanning delta sources for code quality issues...")
             container = await self.scan_delta_source(source, container)
 
             # Step 4: Run LWC unit tests (only if lwc_tests is not 'none')
-
-            print("🧪 Running Lightning Web Component unit tests...")
             container = await self.run_lwc_unit_tests(source, container, lwc_tests)
 
             # Step 5: Login to Salesforce CLI
-            print(f"🔐 Logging into Salesforce org with alias '{alias}'...")
             container = await self.login_sf_cli(source, auth_url, container, alias)
 
             # Step 6: Dry run delta changes deployment
-            print("🚀 Performing dry run deployment of delta changes...")
             container = await self.dry_run_delta_changes(
                 source, auth_url, container, alias, apex_tests
             )
 
             # Step 7: Dry run destructive changes (if any)
-            print("💥 Checking and dry running destructive changes...")
             container = await self.dry_run_delta_destructive_changes(
                 source, auth_url, container, alias
             )
