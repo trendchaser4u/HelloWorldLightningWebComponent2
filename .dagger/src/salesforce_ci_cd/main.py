@@ -664,3 +664,479 @@ class SalesforceCiCd:
 
             error_output = await error_container.stdout()
             return error_output
+
+    @function
+    async def create_promotional_branch(
+        self,
+        base_ref: Annotated[str, Doc("Target branch name to merge into")],
+        head_ref: Annotated[str, Doc("Source branch name to merge from")],
+        github_token: Annotated[dagger.Secret, Doc("GitHub personal access token")],
+        repo_name: Annotated[str, Doc("Repository name in format 'owner/repo'")],
+    ) -> dagger.Container:
+        """
+        Create a promotional branch by merging source branch changes into target branch.
+        Returns container with merge result or conflict information.
+        """
+        # Initialize logging
+        promotion_branch = f"promotion/{head_ref}-to-{base_ref}"
+        log_file = "promotional_branch.log"
+
+        # Use lightweight Alpine container with only necessary dependencies
+        container = (
+            dag.container()
+            .from_("alpine:latest")
+            .with_workdir("/src")
+            # Install minimal dependencies for git operations and GitHub CLI
+            .with_exec(
+                [
+                    "apk",
+                    "add",
+                    "--no-cache",
+                    "git",
+                    "curl",
+                    "bash",
+                    "openssh-client",
+                    "ca-certificates",
+                ]
+            )
+            # Install GitHub CLI
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    """
+                # Download and install GitHub CLI for Alpine
+                curl -fsSL https://github.com/cli/cli/releases/latest/download/gh_$(uname -s)_$(uname -m).tar.gz | tar -xz
+                mv gh_*/bin/gh /usr/local/bin/
+                rm -rf gh_*
+                """,
+                ]
+            )
+        )
+
+        # Authenticate with GitHub using token
+        container = (
+            container.with_secret_variable("GITHUB_TOKEN", github_token).with_exec(
+                ["sh", "-c", "echo $GITHUB_TOKEN | gh auth login --with-token"]
+            )
+            # Verify authentication
+            .with_exec(["gh", "auth", "status"])
+        )
+
+        # Configure git user for merge operations
+        container = container.with_exec(
+            ["git", "config", "--global", "user.email", "ci@salesforce.com"]
+        ).with_exec(["git", "config", "--global", "user.name", "Salesforce CI"])
+
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            # Initialize log file with header
+            cat > {log_file} << 'EOF'
+    ========================================
+    PROMOTIONAL BRANCH CREATION LOG
+    ========================================
+    Repository: {repo_name}
+    Source Branch: {head_ref}
+    Target Branch: {base_ref}
+    Promotion Branch: {promotion_branch}
+    Timestamp: $(date)
+    ========================================
+
+    EOF
+            echo "📋 Log file initialized: {log_file}"
+            """,
+            ]
+        )
+
+        # Clone repository
+        container = (
+            container.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+            echo "📥 Starting repository clone..." | tee -a {log_file}
+            echo "Command: gh repo clone {repo_name} ." >> {log_file}
+            """,
+                ]
+            )
+            .with_exec(["gh", "repo", "clone", repo_name, "."])
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+            if [ $? -eq 0 ]; then
+                echo "✅ Repository cloned successfully" | tee -a {log_file}
+            else
+                echo "❌ Repository clone failed" | tee -a {log_file}
+                exit 1
+            fi
+            """,
+                ]
+            )
+        )
+
+        # Fetch all branches
+        container = (
+            container.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+            echo "🔄 Fetching all branches..." | tee -a {log_file}
+            echo "Command: git fetch --all" >> {log_file}
+            """,
+                ]
+            )
+            .with_exec(["git", "fetch", "--all"])
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+            if [ $? -eq 0 ]; then
+                echo "✅ All branches fetched successfully" | tee -a {log_file}
+                echo "Available branches:" >> {log_file}
+                git branch -r >> {log_file}
+            else
+                echo "❌ Failed to fetch branches" | tee -a {log_file}
+                exit 1
+            fi
+            """,
+                ]
+            )
+        )
+
+        # Verify source branch exists
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            echo "🔍 Verifying source branch '{head_ref}'..." | tee -a {log_file}
+            if git show-ref --verify --quiet refs/remotes/origin/{head_ref}; then
+                echo "✅ Source branch '{head_ref}' exists" | tee -a {log_file}
+            else
+                echo "❌ Error: Source branch '{head_ref}' does not exist" | tee -a {log_file}
+                echo "Available remote branches:" >> {log_file}
+                git branch -r >> {log_file}
+                exit 1
+            fi
+            """,
+            ]
+        )
+
+        # Verify target branch exists
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            echo "🔍 Verifying target branch '{base_ref}'..." | tee -a {log_file}
+            if git show-ref --verify --quiet refs/remotes/origin/{base_ref}; then
+                echo "✅ Target branch '{base_ref}' exists" | tee -a {log_file}
+            else
+                echo "❌ Error: Target branch '{base_ref}' does not exist" | tee -a {log_file}
+                echo "Available remote branches:" >> {log_file}
+                git branch -r >> {log_file}
+                exit 1
+            fi
+            """,
+            ]
+        )
+
+        # Create promotional branch
+        container = (
+            container.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+            echo "🌿 Creating promotional branch '{promotion_branch}' from target branch..." | tee -a {log_file}
+            echo "Command: git checkout -b {promotion_branch} origin/{base_ref}" >> {log_file}
+            """,
+                ]
+            )
+            .with_exec(
+                ["git", "checkout", "-b", promotion_branch, f"origin/{base_ref}"]
+            )
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+            if [ $? -eq 0 ]; then
+                echo "✅ Promotional branch created successfully" | tee -a {log_file}
+                echo "Current branch: $(git branch --show-current)" >> {log_file}
+            else
+                echo "❌ Failed to create promotional branch" | tee -a {log_file}
+                exit 1
+            fi
+            """,
+                ]
+            )
+        )
+
+        # Attempt merge
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+                echo "🔀 Attempting to merge '{head_ref}' into '{promotion_branch}'..." | tee -a {log_file}
+                echo "Command: git merge origin/{head_ref} --no-edit --no-ff" >> {log_file}
+                echo "Merge attempt started at: $(date)" >> {log_file}
+                """,
+            ]
+        )
+
+        # Perform the actual merge and handle results
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+                # Attempt the merge
+                if git merge origin/{head_ref} --no-edit --no-ff; then
+                    echo "✅ Merge completed successfully without conflicts" | tee -a {log_file}
+                    echo "Merge completed at: $(date)" >> {log_file}
+                    
+                    # Log merge statistics
+                    echo "" >> {log_file}
+                    echo "=== MERGE STATISTICS ===" >> {log_file}
+                    git log --oneline {base_ref}..{promotion_branch} >> {log_file}
+                    echo "" >> {log_file}
+                    
+                    # Set success flag
+                    echo "MERGE_SUCCESS=true" > merge_result.env
+                else
+                    echo "⚠️ Merge conflicts detected!" | tee -a {log_file}
+                    echo "Merge conflict detected at: $(date)" >> {log_file}
+                    
+                    # Get list of conflicted files
+                    conflicted_files=$(git diff --name-only --diff-filter=U)
+                    echo "📋 Conflicted files:" | tee -a {log_file}
+                    echo "$conflicted_files" | tee -a {log_file}
+                    
+                    # Set failure flag
+                    echo "MERGE_SUCCESS=false" > merge_result.env
+                    echo "CONFLICTED_FILES<<EOF" >> merge_result.env
+                    echo "$conflicted_files" >> merge_result.env
+                    echo "EOF" >> merge_result.env
+                fi
+                """,
+            ]
+        )
+
+        # Handle successful merge
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            if [ -f merge_result.env ] && grep -q "MERGE_SUCCESS=true" merge_result.env; then
+                echo "📤 Pushing promotional branch to remote..." | tee -a {log_file}
+                echo "Command: git push origin {promotion_branch}" >> {log_file}
+            fi
+            """,
+            ]
+        ).with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            if [ -f merge_result.env ] && grep -q "MERGE_SUCCESS=true" merge_result.env; then
+                git push origin {promotion_branch}
+                if [ $? -eq 0 ]; then
+                    echo "✅ Promotional branch pushed successfully" | tee -a {log_file}
+                    echo "🎉 Promotional branch '{promotion_branch}' created successfully!" | tee -a {log_file}
+                    echo "🔗 Branch URL: https://github.com/{repo_name}/tree/{promotion_branch}" | tee -a {log_file}
+                    echo "Push completed at: $(date)" >> {log_file}
+                else
+                    echo "❌ Failed to push promotional branch" | tee -a {log_file}
+                    exit 1
+                fi
+            fi
+            """,
+            ]
+        )
+
+        # Handle merge conflicts
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            if [ -f merge_result.env ] && grep -q "MERGE_SUCCESS=false" merge_result.env; then
+                echo "" >> {log_file}
+                echo "=== CONFLICT ANALYSIS ===" >> {log_file}
+                
+                # Get conflicted files from environment
+                conflicted_files=$(git diff --name-only --diff-filter=U)
+                
+                for file in $conflicted_files; do
+                    echo "=== Analyzing conflicts in $file ===" >> {log_file}
+                    
+                    # Show conflict markers and context
+                    echo "--- Conflicted content ---" >> {log_file}
+                    cat "$file" >> {log_file} 2>/dev/null || echo "Unable to read file" >> {log_file}
+                    echo "" >> {log_file}
+                    
+                    # Try to show individual versions
+                    echo "--- Target branch version ({base_ref}) ---" >> {log_file}
+                    git show ":2:$file" >> {log_file} 2>/dev/null || echo "File not found in target" >> {log_file}
+                    echo "" >> {log_file}
+                    
+                    echo "--- Source branch version ({head_ref}) ---" >> {log_file}
+                    git show ":3:$file" >> {log_file} 2>/dev/null || echo "File not found in source" >> {log_file}
+                    echo "" >> {log_file}
+                    echo "========================================" >> {log_file}
+                done
+                
+                # Abort the merge to clean state
+                echo "🔄 Aborting merge to restore clean state..." | tee -a {log_file}
+                git merge --abort
+                
+                echo "" >> {log_file}
+                echo "❌ Promotional branch creation failed due to conflicts" | tee -a {log_file}
+                echo "🔧 Manual resolution required for files listed above" | tee -a {log_file}
+                echo "Conflict analysis completed at: $(date)" >> {log_file}
+            fi
+            """,
+            ]
+        )
+
+        # Generate final summary
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            echo "" >> {log_file}
+            echo "=== FINAL SUMMARY ===" >> {log_file}
+            echo "Operation completed at: $(date)" >> {log_file}
+            
+            if [ -f merge_result.env ] && grep -q "MERGE_SUCCESS=true" merge_result.env; then
+                echo "Result: SUCCESS" >> {log_file}
+                echo "Promotional branch '{promotion_branch}' is ready for use" >> {log_file}
+            else
+                echo "Result: FAILED - CONFLICTS DETECTED" >> {log_file}
+                echo "Manual intervention required" >> {log_file}
+            fi
+            
+            echo "========================================" >> {log_file}
+            
+            # Display final status
+            echo "📋 Operation Summary:"
+            if [ -f merge_result.env ] && grep -q "MERGE_SUCCESS=true" merge_result.env; then
+                echo "✅ Promotional branch creation completed successfully"
+                echo "📁 Branch: {promotion_branch}"
+                echo "🔗 URL: https://github.com/{repo_name}/tree/{promotion_branch}"
+            else
+                echo "❌ Promotional branch creation failed due to merge conflicts"
+                echo "📝 Check the log file for detailed conflict information"
+            fi
+            
+            echo ""
+            echo "📄 Full log available in: {log_file}"
+            echo "📊 Log summary:"
+            wc -l {log_file}
+            """,
+            ]
+        )
+
+        # Display log file for debugging
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            echo "=== LOG FILE CONTENTS ==="
+            cat {log_file}
+            echo "=== END LOG FILE ==="
+            """,
+            ]
+        )
+
+        # Export log files and results
+        container = container.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+            # Create logs directory for export
+            mkdir -p /src/logs
+            
+            # Copy main log file with timestamp
+            timestamp=$(date +%Y%m%d_%H%M%S)
+            cp {log_file} /src/logs/promotional_branch_${{timestamp}}.log
+            
+            # Copy merge result environment file if it exists
+            if [ -f merge_result.env ]; then
+                cp merge_result.env /src/logs/
+            fi
+            
+            # Create comprehensive summary file
+            cat > /src/logs/summary.txt << EOF
+            Promotional Branch Operation Summary
+            ===================================
+            Repository: {repo_name}
+            Source Branch: {head_ref}
+            Target Branch: {base_ref}
+            Promotion Branch: {promotion_branch}
+            Operation Time: $(date)
+
+            Status: $(if [ -f merge_result.env ] && grep -q "MERGE_SUCCESS=true" merge_result.env; then echo "SUCCESS"; else echo "FAILED"; fi)
+
+            Files Generated:
+            - promotional_branch_${{timestamp}}.log (detailed operation log)
+            - merge_result.env (operation status and results)
+            - summary.txt (this summary file)
+
+            $(if [ -f merge_result.env ] && grep -q "MERGE_SUCCESS=true" merge_result.env; then
+            echo "SUCCESS: Promotional branch created successfully!
+            Branch URL: https://github.com/{repo_name}/tree/{promotion_branch}
+            Next steps:
+            1. Review the promotional branch
+            2. Create a pull request if needed
+            3. Deploy to target environment"
+            else
+            echo "FAILURE: Merge conflicts detected!
+            Next steps:
+            1. Review the detailed log for conflict analysis
+            2. Manually resolve conflicts in a local environment
+            3. Re-attempt the promotional branch creation"
+            fi)
+
+            Log Summary:
+            - Total log lines: $(wc -l < /src/logs/promotional_branch_${{timestamp}}.log)
+            - Operation duration: Started at $(head -n 10 /src/logs/promotional_branch_${{timestamp}}.log | grep "Timestamp:" | cut -d: -f2-)
+
+            EOF
+                    
+                    # Create a JSON summary for programmatic access
+                    cat > /src/logs/operation_result.json << EOF
+            {{
+            "repository": "{repo_name}",
+            "source_branch": "{head_ref}",
+            "target_branch": "{base_ref}",
+            "promotion_branch": "{promotion_branch}",
+            "timestamp": "$(date -Iseconds)",
+            "success": $(if [ -f merge_result.env ] && grep -q "MERGE_SUCCESS=true" merge_result.env; then echo "true"; else echo "false"; fi),
+            "log_file": "promotional_branch_${{timestamp}}.log",
+            "branch_url": "https://github.com/{repo_name}/tree/{promotion_branch}"
+            }}
+            EOF
+            
+            echo "📄 Log files exported to /src/logs/"
+            echo "📊 Export summary:"
+            ls -la /src/logs/
+            """,
+            ]
+        )
+
+        return container.export("/src/logs")
