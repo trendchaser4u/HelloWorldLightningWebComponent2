@@ -3,6 +3,7 @@ import getGreeting from "@salesforce/apex/HelloWorldController.getGreeting";
 import getCurrentDateTime from "@salesforce/apex/HelloWorldController.getCurrentDateTime";
 
 export default class HelloWorld extends LightningElement {
+  
   @track greeting = "Hello, World!";
   @track currentDateTime = "";
   @track userName = "";
@@ -20,7 +21,6 @@ export default class HelloWorld extends LightningElement {
       this.greeting = await getGreeting({ name: this.userName });
     } catch (error) {
       this.greeting = "Error: " + (error.body?.message || error.message);
-      console.error("Greeting loading error:", error);
     }
   }
 
@@ -29,7 +29,6 @@ export default class HelloWorld extends LightningElement {
       this.currentDateTime = await getCurrentDateTime();
     } catch (error) {
       this.currentDateTime = "Error loading date/time";
-      console.error("DateTime loading error:", error);
     }
   }
 }

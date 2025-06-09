@@ -1,4 +1,5 @@
 public with sharing class HelloWorldController {
+  
   @AuraEnabled(cacheable=true)
   public static String getGreeting(String name) {
     if (String.isBlank(name)) {
